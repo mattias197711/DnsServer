@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2024  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -20,12 +20,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 using DnsServerCore.ApplicationCommon;
 using MaxMind.GeoIP2.Model;
 using MaxMind.GeoIP2.Responses;
-using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Text.Json;
 using System.Threading.Tasks;
+using TechnitiumLibrary;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.EDnsOptions;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace GeoDistance
@@ -34,6 +36,7 @@ namespace GeoDistance
     {
         #region variables
 
+        IDnsServer _dnsServer;
         MaxMind _maxMind;
 
         #endregion
@@ -82,33 +85,56 @@ namespace GeoDistance
 
         public Task InitializeAsync(IDnsServer dnsServer, string config)
         {
+            _dnsServer = dnsServer;
             _maxMind = MaxMind.Create(dnsServer);
 
             return Task.CompletedTask;
         }
 
-        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, uint appRecordTtl, string appRecordData)
+        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, string appRecordName, uint appRecordTtl, string appRecordData)
         {
+            DnsQuestionRecord question = request.Question[0];
+
+            if (!question.Name.Equals(appRecordName, StringComparison.OrdinalIgnoreCase) && !appRecordName.StartsWith('*'))
+                return Task.FromResult<DnsDatagram>(null);
+
             Location location = null;
 
-            if (_maxMind.DatabaseReader.TryCity(remoteEP.Address, out CityResponse response))
+            byte scopePrefixLength = 0;
+            EDnsClientSubnetOptionData requestECS = request.GetEDnsClientSubnetOption();
+            if (requestECS is not null)
+            {
+                if ((_maxMind.IspReader is not null) && _maxMind.IspReader.TryIsp(requestECS.Address, out IspResponse csIsp) && (csIsp.Network is not null))
+                    scopePrefixLength = (byte)csIsp.Network.PrefixLength;
+                else if ((_maxMind.AsnReader is not null) && _maxMind.AsnReader.TryAsn(requestECS.Address, out AsnResponse csAsn) && (csAsn.Network is not null))
+                    scopePrefixLength = (byte)csAsn.Network.PrefixLength;
+                else
+                    scopePrefixLength = requestECS.SourcePrefixLength;
+
+                if (_maxMind.CityReader.TryCity(requestECS.Address, out CityResponse csResponse) && csResponse.Location.HasCoordinates)
+                    location = csResponse.Location;
+            }
+
+            if ((location is null) && _maxMind.CityReader.TryCity(remoteEP.Address, out CityResponse response) && response.Location.HasCoordinates)
                 location = response.Location;
 
-            dynamic jsonAppRecordData = JsonConvert.DeserializeObject(appRecordData);
-            dynamic jsonClosestServer = null;
+            using JsonDocument jsonDocument = JsonDocument.Parse(appRecordData);
+            JsonElement jsonAppRecordData = jsonDocument.RootElement;
+            JsonElement jsonClosestServer = default;
 
-            if ((location == null) || !location.HasCoordinates)
+            if (location is null)
             {
-                jsonClosestServer = jsonAppRecordData[0];
+                if (jsonAppRecordData.GetArrayLength() > 0)
+                    jsonClosestServer = jsonAppRecordData[0];
             }
             else
             {
                 double lastDistance = double.MaxValue;
 
-                foreach (dynamic jsonServer in jsonAppRecordData)
+                foreach (JsonElement jsonServer in jsonAppRecordData.EnumerateArray())
                 {
-                    double lat = Convert.ToDouble(jsonServer.lat.Value);
-                    double @long = Convert.ToDouble(jsonServer.@long.Value);
+                    double lat = Convert.ToDouble(jsonServer.GetProperty("lat").GetString());
+                    double @long = Convert.ToDouble(jsonServer.GetProperty("long").GetString());
 
                     double distance = GetDistance(lat, @long, location.Latitude.Value, location.Longitude.Value);
 
@@ -120,25 +146,26 @@ namespace GeoDistance
                 }
             }
 
-            if (jsonClosestServer == null)
+            if (jsonClosestServer.ValueKind == JsonValueKind.Undefined)
                 return Task.FromResult<DnsDatagram>(null);
 
-            dynamic jsonCname = jsonClosestServer.cname;
-            if (jsonCname == null)
-                return Task.FromResult<DnsDatagram>(null);
-
-            string cname = jsonCname.Value;
+            string cname = jsonClosestServer.GetPropertyValue("cname", null);
             if (string.IsNullOrEmpty(cname))
                 return Task.FromResult<DnsDatagram>(null);
 
             IReadOnlyList<DnsResourceRecord> answers;
 
-            if (request.Question[0].Name.Equals(zoneName, StringComparison.OrdinalIgnoreCase)) //check for zone apex
-                answers = new DnsResourceRecord[] { new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.ANAME, DnsClass.IN, appRecordTtl, new DnsANAMERecord(cname)) }; //use ANAME
+            if (question.Name.Equals(zoneName, StringComparison.OrdinalIgnoreCase)) //check for zone apex
+                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.ANAME, DnsClass.IN, appRecordTtl, new DnsANAMERecordData(cname)) }; //use ANAME
             else
-                answers = new DnsResourceRecord[] { new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.CNAME, DnsClass.IN, appRecordTtl, new DnsCNAMERecord(cname)) };
+                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.CNAME, DnsClass.IN, appRecordTtl, new DnsCNAMERecordData(cname)) };
 
-            return Task.FromResult(new DnsDatagram(request.Identifier, true, request.OPCODE, true, false, request.RecursionDesired, isRecursionAllowed, false, false, DnsResponseCode.NoError, request.Question, answers));
+            EDnsOption[] options = null;
+
+            if (requestECS is not null)
+                options = EDnsClientSubnetOptionData.GetEDnsClientSubnetOption(requestECS.SourcePrefixLength, scopePrefixLength, requestECS.Address);
+
+            return Task.FromResult(new DnsDatagram(request.Identifier, true, request.OPCODE, true, false, request.RecursionDesired, isRecursionAllowed, false, false, DnsResponseCode.NoError, request.Question, answers, null, null, _dnsServer.UdpPayloadSize, EDnsHeaderFlags.None, options));
         }
 
         #endregion

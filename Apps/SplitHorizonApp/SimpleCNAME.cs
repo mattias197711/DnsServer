@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2024  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,10 +18,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.ApplicationCommon;
-using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Text.Json;
 using System.Threading.Tasks;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
@@ -29,7 +29,7 @@ using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace SplitHorizon
 {
-    public class SimpleCNAME : IDnsApplication, IDnsAppRecordRequestHandler
+    public sealed class SimpleCNAME : IDnsApplication, IDnsAppRecordRequestHandler
     {
         #region IDisposable
 
@@ -44,52 +44,78 @@ namespace SplitHorizon
 
         public Task InitializeAsync(IDnsServer dnsServer, string config)
         {
-            //no config needed
+            //SimpleAddress loads the shared config
             return Task.CompletedTask;
         }
 
-        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, uint appRecordTtl, string appRecordData)
+        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, string appRecordName, uint appRecordTtl, string appRecordData)
         {
-            dynamic jsonAppRecordData = JsonConvert.DeserializeObject(appRecordData);
-            dynamic jsonCname = null;
+            DnsQuestionRecord question = request.Question[0];
 
-            foreach (dynamic jsonProperty in jsonAppRecordData)
+            if (!question.Name.Equals(appRecordName, StringComparison.OrdinalIgnoreCase) && !appRecordName.StartsWith('*'))
+                return Task.FromResult<DnsDatagram>(null);
+
+            using JsonDocument jsonDocument = JsonDocument.Parse(appRecordData);
+            JsonElement jsonAppRecordData = jsonDocument.RootElement;
+            JsonElement jsonCname = default;
+
+            NetworkAddress selectedNetwork = null;
+
+            foreach (JsonProperty jsonProperty in jsonAppRecordData.EnumerateObject())
             {
                 string name = jsonProperty.Name;
 
                 if ((name == "public") || (name == "private"))
                     continue;
 
-                NetworkAddress networkAddress = NetworkAddress.Parse(name);
-                if (networkAddress.Contains(remoteEP.Address))
+                if (SimpleAddress.Networks.TryGetValue(name, out List<NetworkAddress> networkAddresses))
                 {
-                    jsonCname = jsonProperty.Value;
-                    break;
+                    foreach (NetworkAddress networkAddress in networkAddresses)
+                    {
+                        if (networkAddress.Contains(remoteEP.Address))
+                        {
+                            jsonCname = jsonProperty.Value;
+                            break;
+                        }
+                    }
+
+                    if (jsonCname.ValueKind != JsonValueKind.Undefined)
+                        break;
+                }
+                else if (NetworkAddress.TryParse(name, out NetworkAddress networkAddress))
+                {
+                    if (networkAddress.Contains(remoteEP.Address) && ((selectedNetwork is null) || (networkAddress.PrefixLength > selectedNetwork.PrefixLength)))
+                    {
+                        selectedNetwork = networkAddress;
+                        jsonCname = jsonProperty.Value;
+                    }
                 }
             }
 
-            if (jsonCname is null)
+            if (jsonCname.ValueKind == JsonValueKind.Undefined)
             {
                 if (NetUtilities.IsPrivateIP(remoteEP.Address))
-                    jsonCname = jsonAppRecordData.@private;
+                {
+                    if (!jsonAppRecordData.TryGetProperty("private", out jsonCname))
+                        return Task.FromResult<DnsDatagram>(null);
+                }
                 else
-                    jsonCname = jsonAppRecordData.@public;
-
-                if (jsonCname is null)
-                    return Task.FromResult<DnsDatagram>(null);
+                {
+                    if (!jsonAppRecordData.TryGetProperty("public", out jsonCname))
+                        return Task.FromResult<DnsDatagram>(null);
+                }
             }
 
-            string cname = jsonCname.Value;
+            string cname = jsonCname.GetString();
             if (string.IsNullOrEmpty(cname))
                 return Task.FromResult<DnsDatagram>(null);
 
-            DnsQuestionRecord question = request.Question[0];
             IReadOnlyList<DnsResourceRecord> answers;
 
             if (question.Name.Equals(zoneName, StringComparison.OrdinalIgnoreCase)) //check for zone apex
-                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.ANAME, DnsClass.IN, appRecordTtl, new DnsANAMERecord(cname)) }; //use ANAME
+                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.ANAME, DnsClass.IN, appRecordTtl, new DnsANAMERecordData(cname)) }; //use ANAME
             else
-                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.CNAME, DnsClass.IN, appRecordTtl, new DnsCNAMERecord(cname)) };
+                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.CNAME, DnsClass.IN, appRecordTtl, new DnsCNAMERecordData(cname)) };
 
             return Task.FromResult(new DnsDatagram(request.Identifier, true, request.OPCODE, true, false, request.RecursionDesired, isRecursionAllowed, false, false, DnsResponseCode.NoError, request.Question, answers));
         }
@@ -108,6 +134,7 @@ namespace SplitHorizon
                 return @"{
   ""public"": ""api.example.com"",
   ""private"": ""api.example.corp"",
+  ""custom-networks"": ""custom.example.corp"",
   ""10.0.0.0/8"": ""api.intranet.example.corp""
 }";
             }

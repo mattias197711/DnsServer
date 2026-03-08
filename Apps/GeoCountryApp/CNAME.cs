@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2025  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,12 +19,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using DnsServerCore.ApplicationCommon;
 using MaxMind.GeoIP2.Responses;
-using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Text.Json;
 using System.Threading.Tasks;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.EDnsOptions;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace GeoCountry
@@ -33,6 +34,7 @@ namespace GeoCountry
     {
         #region variables
 
+        IDnsServer _dnsServer;
         MaxMind _maxMind;
 
         #endregion
@@ -66,42 +68,89 @@ namespace GeoCountry
 
         public Task InitializeAsync(IDnsServer dnsServer, string config)
         {
+            _dnsServer = dnsServer;
             _maxMind = MaxMind.Create(dnsServer);
 
             return Task.CompletedTask;
         }
 
-        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, uint appRecordTtl, string appRecordData)
+        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, string appRecordName, uint appRecordTtl, string appRecordData)
         {
-            dynamic jsonAppRecordData = JsonConvert.DeserializeObject(appRecordData);
-            dynamic jsonCountry;
+            DnsQuestionRecord question = request.Question[0];
 
-            if (_maxMind.DatabaseReader.TryCountry(remoteEP.Address, out CountryResponse response))
-            {
-                jsonCountry = jsonAppRecordData[response.Country.IsoCode];
-                if (jsonCountry == null)
-                    jsonCountry = jsonAppRecordData["default"];
-            }
-            else
-            {
-                jsonCountry = jsonAppRecordData["default"];
-            }
-
-            if (jsonCountry == null)
+            if (!question.Name.Equals(appRecordName, StringComparison.OrdinalIgnoreCase) && !appRecordName.StartsWith('*'))
                 return Task.FromResult<DnsDatagram>(null);
 
-            string cname = jsonCountry.Value;
+            using JsonDocument jsonDocument = JsonDocument.Parse(appRecordData);
+            JsonElement jsonAppRecordData = jsonDocument.RootElement;
+            JsonElement jsonCountry = default;
+            string countryCode = null;
+
+            byte scopePrefixLength = 0;
+            EDnsClientSubnetOptionData requestECS = request.GetEDnsClientSubnetOption();
+            if (requestECS is not null)
+            {
+                if ((_maxMind.IspReader is not null) && _maxMind.IspReader.TryIsp(requestECS.Address, out IspResponse csIsp) && (csIsp.Network is not null))
+                    scopePrefixLength = (byte)csIsp.Network.PrefixLength;
+                else if ((_maxMind.AsnReader is not null) && _maxMind.AsnReader.TryAsn(requestECS.Address, out AsnResponse csAsn) && (csAsn.Network is not null))
+                    scopePrefixLength = (byte)csAsn.Network.PrefixLength;
+                else
+                    scopePrefixLength = requestECS.SourcePrefixLength;
+
+                if (_maxMind.CountryReader.TryCountry(requestECS.Address, out CountryResponse csResponse))
+                {
+                    string cc = csResponse.Country.IsoCode;
+
+                    if (!jsonAppRecordData.TryGetProperty(cc, out jsonCountry))
+                    {
+                        jsonAppRecordData.TryGetProperty("default", out jsonCountry);
+                        countryCode = cc is null ? "default" : cc.ToLowerInvariant();
+                    }
+                }
+            }
+
+            if (jsonCountry.ValueKind == JsonValueKind.Undefined)
+            {
+                if (_maxMind.CountryReader.TryCountry(remoteEP.Address, out CountryResponse response))
+                {
+                    string cc = response.Country.IsoCode;
+
+                    if (!jsonAppRecordData.TryGetProperty(cc, out jsonCountry))
+                    {
+                        jsonAppRecordData.TryGetProperty("default", out jsonCountry);
+                        countryCode = cc is null ? "default" : cc.ToLowerInvariant();
+                    }
+                }
+                else
+                {
+                    jsonAppRecordData.TryGetProperty("default", out jsonCountry);
+                    countryCode = "default";
+                }
+
+                if (jsonCountry.ValueKind == JsonValueKind.Undefined)
+                    return Task.FromResult<DnsDatagram>(null);
+            }
+
+            string cname = jsonCountry.GetString();
             if (string.IsNullOrEmpty(cname))
                 return Task.FromResult<DnsDatagram>(null);
 
+            if (countryCode is not null)
+                cname = cname.Replace("{CountryCode}", countryCode, StringComparison.OrdinalIgnoreCase);
+
             IReadOnlyList<DnsResourceRecord> answers;
 
-            if (request.Question[0].Name.Equals(zoneName, StringComparison.OrdinalIgnoreCase)) //check for zone apex
-                answers = new DnsResourceRecord[] { new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.ANAME, DnsClass.IN, appRecordTtl, new DnsANAMERecord(cname)) }; //use ANAME
+            if (question.Name.Equals(zoneName, StringComparison.OrdinalIgnoreCase)) //check for zone apex
+                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.ANAME, DnsClass.IN, appRecordTtl, new DnsANAMERecordData(cname)) }; //use ANAME
             else
-                answers = new DnsResourceRecord[] { new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.CNAME, DnsClass.IN, appRecordTtl, new DnsCNAMERecord(cname)) };
+                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.CNAME, DnsClass.IN, appRecordTtl, new DnsCNAMERecordData(cname)) };
 
-            return Task.FromResult(new DnsDatagram(request.Identifier, true, request.OPCODE, true, false, request.RecursionDesired, isRecursionAllowed, false, false, DnsResponseCode.NoError, request.Question, answers));
+            EDnsOption[] options = null;
+
+            if (requestECS is not null)
+                options = EDnsClientSubnetOptionData.GetEDnsClientSubnetOption(requestECS.SourcePrefixLength, scopePrefixLength, requestECS.Address);
+
+            return Task.FromResult(new DnsDatagram(request.Identifier, true, request.OPCODE, true, false, request.RecursionDesired, isRecursionAllowed, false, false, DnsResponseCode.NoError, request.Question, answers, null, null, _dnsServer.UdpPayloadSize, EDnsHeaderFlags.None, options));
         }
 
         #endregion
@@ -109,7 +158,7 @@ namespace GeoCountry
         #region properties
 
         public string Description
-        { get { return "Returns CNAME record based on the country the client queries from using MaxMind GeoIP2 Country database. Note that the app will return ANAME record for an APP record at zone apex. Use the two-character ISO 3166-1 alpha code for the country."; } }
+        { get { return "Returns CNAME record based on the country the client queries from using MaxMind GeoIP2 Country database. Note that the app will return ANAME record for an APP record at zone apex. Use the two-character ISO 3166-1 alpha code for the country. You can also use '{CountryCode}' variable in the default case domain name which will get replaced by the app using the client's actual ISO country code or 'default' if not found."; } }
 
         public string ApplicationRecordDataTemplate
         {

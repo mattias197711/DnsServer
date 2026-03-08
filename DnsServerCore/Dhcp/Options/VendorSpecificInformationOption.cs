@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2020  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2024  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,8 +18,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using System;
-using System.Globalization;
 using System.IO;
+using TechnitiumLibrary;
 using TechnitiumLibrary.IO;
 
 namespace DnsServerCore.Dhcp.Options
@@ -37,7 +37,10 @@ namespace DnsServerCore.Dhcp.Options
         public VendorSpecificInformationOption(string hexInfo)
             : base(DhcpOptionCode.VendorSpecificInformation)
         {
-            _information = ParseHexString(hexInfo);
+            if (hexInfo.Contains(':'))
+                _information = hexInfo.ParseColonHexString();
+            else
+                _information = Convert.FromHexString(hexInfo);
         }
 
         public VendorSpecificInformationOption(byte[] information)
@@ -52,61 +55,16 @@ namespace DnsServerCore.Dhcp.Options
 
         #endregion
 
-        #region private
-
-        private static byte[] ParseHexString(string value)
-        {
-            int i;
-            int j = -1;
-            string strHex;
-            int b;
-
-            using (MemoryStream mS = new MemoryStream())
-            {
-                while (true)
-                {
-                    i = value.IndexOf(':', j + 1);
-                    if (i < 0)
-                        i = value.Length;
-
-                    strHex = value.Substring(j + 1, i - j - 1);
-
-                    if (!int.TryParse(strHex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out b) || (b < byte.MinValue) || (b > byte.MaxValue))
-                        throw new InvalidDataException("VendorSpecificInformation option data must be a colon (:) separated hex string.");
-
-                    mS.WriteByte((byte)b);
-
-                    if (i == value.Length)
-                        break;
-
-                    j = i;
-                }
-
-                return mS.ToArray();
-            }
-        }
-
-        #endregion
-
         #region protected
 
         protected override void ParseOptionValue(Stream s)
         {
-            _information = s.ReadBytes((int)s.Length);
+            _information = s.ReadExactly((int)s.Length);
         }
 
         protected override void WriteOptionValue(Stream s)
         {
             s.Write(_information);
-        }
-
-        #endregion
-
-        #region public
-
-        public override string ToString()
-        {
-            return BitConverter.ToString(_information).Replace("-", ":");
         }
 
         #endregion

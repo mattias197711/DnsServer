@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2019  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2024  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 using DnsServerCore.Dhcp.Options;
 using System;
 using System.IO;
+using TechnitiumLibrary;
 using TechnitiumLibrary.IO;
 
 namespace DnsServerCore.Dhcp
@@ -102,7 +103,10 @@ namespace DnsServerCore.Dhcp
         StreetTalkServer = 75,
         StreetTalkDirectoryAssistance = 76,
         ClientFullyQualifiedDomainName = 81,
+        DomainSearch = 119,
         ClasslessStaticRoute = 121,
+        CAPWAPAccessControllerAddresses = 138,
+        TftpServerAddress = 150,
         End = 255
     }
 
@@ -117,6 +121,26 @@ namespace DnsServerCore.Dhcp
 
         #region constructor
 
+        public DhcpOption(DhcpOptionCode code, string hexValue)
+        {
+            ArgumentNullException.ThrowIfNull(hexValue);
+
+            _code = code;
+
+            if (hexValue.Contains(':'))
+                _value = hexValue.ParseColonHexString();
+            else
+                _value = Convert.FromHexString(hexValue);
+        }
+
+        public DhcpOption(DhcpOptionCode code, byte[] value)
+        {
+            ArgumentNullException.ThrowIfNull(value);
+
+            _code = code;
+            _value = value;
+        }
+
         protected DhcpOption(DhcpOptionCode code, Stream s)
         {
             _code = code;
@@ -125,7 +149,7 @@ namespace DnsServerCore.Dhcp
             if (len < 0)
                 throw new EndOfStreamException();
 
-            _value = s.ReadBytes(len);
+            _value = s.ReadExactly(len);
         }
 
         protected DhcpOption(DhcpOptionCode code)
@@ -212,8 +236,17 @@ namespace DnsServerCore.Dhcp
                 case DhcpOptionCode.ClientFullyQualifiedDomainName:
                     return new ClientFullyQualifiedDomainNameOption(s);
 
+                case DhcpOptionCode.DomainSearch:
+                    return new DomainSearchOption(s);
+
                 case DhcpOptionCode.ClasslessStaticRoute:
                     return new ClasslessStaticRouteOption(s);
+
+                case DhcpOptionCode.CAPWAPAccessControllerAddresses:
+                    return new CAPWAPAccessControllerOption(s);
+
+                case DhcpOptionCode.TftpServerAddress:
+                    return new TftpServerAddressOption(s);
 
                 case DhcpOptionCode.Pad:
                 case DhcpOptionCode.End:
@@ -312,6 +345,9 @@ namespace DnsServerCore.Dhcp
 
         public DhcpOptionCode Code
         { get { return _code; } }
+
+        public byte[] RawValue
+        { get { return _value; } }
 
         #endregion
     }

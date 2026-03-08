@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2024  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,13 +18,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.ApplicationCommon;
-using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
 using System.Threading.Tasks;
-using TechnitiumLibrary.IO;
+using TechnitiumLibrary;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
@@ -37,7 +37,7 @@ namespace Failover
         Secondary = 2
     }
 
-    public class Address : IDnsApplication, IDnsAppRecordRequestHandler
+    public sealed class Address : IDnsApplication, IDnsAppRecordRequestHandler
     {
         #region variables
 
@@ -64,17 +64,14 @@ namespace Failover
 
         #region private
 
-        private void GetAnswers(dynamic jsonAddresses, DnsQuestionRecord question, uint appRecordTtl, string healthCheck, Uri healthCheckUrl, List<DnsResourceRecord> answers)
+        private void GetAnswers(JsonElement jsonAddresses, DnsQuestionRecord question, uint appRecordTtl, string healthCheck, Uri healthCheckUrl, List<DnsResourceRecord> answers)
         {
-            if (jsonAddresses == null)
-                return;
-
             switch (question.Type)
             {
                 case DnsResourceRecordType.A:
-                    foreach (dynamic jsonAddress in jsonAddresses)
+                    foreach (JsonElement jsonAddress in jsonAddresses.EnumerateArray())
                     {
-                        IPAddress address = IPAddress.Parse(jsonAddress.Value);
+                        IPAddress address = IPAddress.Parse(jsonAddress.GetString());
 
                         if (address.AddressFamily == AddressFamily.InterNetwork)
                         {
@@ -82,11 +79,11 @@ namespace Failover
                             switch (response.Status)
                             {
                                 case HealthStatus.Unknown:
-                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, question.Class, 30, new DnsARecord(address)));
+                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, question.Class, 10, new DnsARecordData(address)));
                                     break;
 
                                 case HealthStatus.Healthy:
-                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, question.Class, appRecordTtl, new DnsARecord(address)));
+                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, question.Class, appRecordTtl, new DnsARecordData(address)));
                                     break;
                             }
                         }
@@ -94,9 +91,9 @@ namespace Failover
                     break;
 
                 case DnsResourceRecordType.AAAA:
-                    foreach (dynamic jsonAddress in jsonAddresses)
+                    foreach (JsonElement jsonAddress in jsonAddresses.EnumerateArray())
                     {
-                        IPAddress address = IPAddress.Parse(jsonAddress.Value);
+                        IPAddress address = IPAddress.Parse(jsonAddress.GetString());
 
                         if (address.AddressFamily == AddressFamily.InterNetworkV6)
                         {
@@ -104,11 +101,11 @@ namespace Failover
                             switch (response.Status)
                             {
                                 case HealthStatus.Unknown:
-                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, question.Class, 30, new DnsAAAARecord(address)));
+                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, question.Class, 10, new DnsAAAARecordData(address)));
                                     break;
 
                                 case HealthStatus.Healthy:
-                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, question.Class, appRecordTtl, new DnsAAAARecord(address)));
+                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, question.Class, appRecordTtl, new DnsAAAARecordData(address)));
                                     break;
                             }
                         }
@@ -117,14 +114,11 @@ namespace Failover
             }
         }
 
-        private void GetStatusAnswers(dynamic jsonAddresses, FailoverType type, DnsQuestionRecord question, uint appRecordTtl, string healthCheck, Uri healthCheckUrl, List<DnsResourceRecord> answers)
+        private void GetStatusAnswers(JsonElement jsonAddresses, FailoverType type, DnsQuestionRecord question, uint appRecordTtl, string healthCheck, Uri healthCheckUrl, List<DnsResourceRecord> answers)
         {
-            if (jsonAddresses == null)
-                return;
-
-            foreach (dynamic jsonAddress in jsonAddresses)
+            foreach (JsonElement jsonAddress in jsonAddresses.EnumerateArray())
             {
-                IPAddress address = IPAddress.Parse(jsonAddress.Value);
+                IPAddress address = IPAddress.Parse(jsonAddress.GetString());
                 HealthCheckResponse response = _healthService.QueryStatus(address, healthCheck, healthCheckUrl, false);
 
                 string text = "app=failover; addressType=" + type.ToString() + "; address=" + address.ToString() + "; healthCheck=" + healthCheck + (healthCheckUrl is null ? "" : "; healthCheckUrl=" + healthCheckUrl.AbsoluteUri) + "; healthStatus=" + response.Status.ToString() + ";";
@@ -132,7 +126,7 @@ namespace Failover
                 if (response.Status == HealthStatus.Failed)
                     text += " failureReason=" + response.FailureReason + ";";
 
-                answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.TXT, question.Class, appRecordTtl, new DnsTXTRecord(text)));
+                answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.TXT, question.Class, appRecordTtl, new DnsTXTRecordData(text)));
             }
         }
 
@@ -145,30 +139,35 @@ namespace Failover
             if (_healthService is null)
                 _healthService = HealthService.Create(dnsServer);
 
-            _healthService.Initialize(JsonConvert.DeserializeObject(config));
+            _healthService.Initialize(config);
 
             return Task.CompletedTask;
         }
 
-        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, uint appRecordTtl, string appRecordData)
+        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, string appRecordName, uint appRecordTtl, string appRecordData)
         {
             DnsQuestionRecord question = request.Question[0];
+
+            if (!question.Name.Equals(appRecordName, StringComparison.OrdinalIgnoreCase) && !appRecordName.StartsWith('*'))
+                return Task.FromResult<DnsDatagram>(null);
+
             switch (question.Type)
             {
                 case DnsResourceRecordType.A:
                 case DnsResourceRecordType.AAAA:
                     {
-                        dynamic jsonAppRecordData = JsonConvert.DeserializeObject(appRecordData);
+                        using JsonDocument jsonDocument = JsonDocument.Parse(appRecordData);
+                        JsonElement jsonAppRecordData = jsonDocument.RootElement;
 
-                        string healthCheck = jsonAppRecordData.healthCheck?.Value;
+                        string healthCheck = jsonAppRecordData.GetPropertyValue("healthCheck", null);
                         Uri healthCheckUrl = null;
 
                         if (_healthService.HealthChecks.TryGetValue(healthCheck, out HealthCheck hc) && ((hc.Type == HealthCheckType.Https) || (hc.Type == HealthCheckType.Http)) && (hc.Url is null))
                         {
                             //read health check url only for http/https type checks and only when app config does not have an url configured
-                            if ((jsonAppRecordData.healthCheckUrl is not null) && (jsonAppRecordData.healthCheckUrl.Value is not null))
+                            if (jsonAppRecordData.TryGetProperty("healthCheckUrl", out JsonElement jsonHealthCheckUrl) && (jsonHealthCheckUrl.ValueKind != JsonValueKind.Null))
                             {
-                                healthCheckUrl = new Uri(jsonAppRecordData.healthCheckUrl.Value);
+                                healthCheckUrl = new Uri(jsonHealthCheckUrl.GetString());
                             }
                             else
                             {
@@ -181,32 +180,36 @@ namespace Failover
 
                         List<DnsResourceRecord> answers = new List<DnsResourceRecord>();
 
-                        GetAnswers(jsonAppRecordData.primary, question, appRecordTtl, healthCheck, healthCheckUrl, answers);
+                        if (jsonAppRecordData.TryGetProperty("primary", out JsonElement jsonPrimary))
+                            GetAnswers(jsonPrimary, question, appRecordTtl, healthCheck, healthCheckUrl, answers);
+
                         if (answers.Count == 0)
                         {
-                            GetAnswers(jsonAppRecordData.secondary, question, appRecordTtl, healthCheck, healthCheckUrl, answers);
+                            if (jsonAppRecordData.TryGetProperty("secondary", out JsonElement jsonSecondary))
+                                GetAnswers(jsonSecondary, question, appRecordTtl, healthCheck, healthCheckUrl, answers);
+
                             if (answers.Count == 0)
                             {
-                                if (jsonAppRecordData.serverDown is not null)
+                                if (jsonAppRecordData.TryGetProperty("serverDown", out JsonElement jsonServerDown))
                                 {
                                     if (question.Type == DnsResourceRecordType.A)
                                     {
-                                        foreach (dynamic jsonAddress in jsonAppRecordData.serverDown)
+                                        foreach (JsonElement jsonAddress in jsonServerDown.EnumerateArray())
                                         {
-                                            IPAddress address = IPAddress.Parse(jsonAddress.Value);
+                                            IPAddress address = IPAddress.Parse(jsonAddress.GetString());
 
                                             if (address.AddressFamily == AddressFamily.InterNetwork)
-                                                answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, question.Class, 30, new DnsARecord(address)));
+                                                answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, question.Class, 30, new DnsARecordData(address)));
                                         }
                                     }
                                     else
                                     {
-                                        foreach (dynamic jsonAddress in jsonAppRecordData.serverDown)
+                                        foreach (JsonElement jsonAddress in jsonServerDown.EnumerateArray())
                                         {
-                                            IPAddress address = IPAddress.Parse(jsonAddress.Value);
+                                            IPAddress address = IPAddress.Parse(jsonAddress.GetString());
 
                                             if (address.AddressFamily == AddressFamily.InterNetworkV6)
-                                                answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, question.Class, 30, new DnsAAAARecord(address)));
+                                                answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, question.Class, 30, new DnsAAAARecordData(address)));
                                         }
                                     }
                                 }
@@ -224,27 +227,22 @@ namespace Failover
 
                 case DnsResourceRecordType.TXT:
                     {
-                        dynamic jsonAppRecordData = JsonConvert.DeserializeObject(appRecordData);
+                        using JsonDocument jsonDocument = JsonDocument.Parse(appRecordData);
+                        JsonElement jsonAppRecordData = jsonDocument.RootElement;
 
-                        bool allowTxtStatus;
-
-                        if (jsonAppRecordData.allowTxtStatus == null)
-                            allowTxtStatus = false;
-                        else
-                            allowTxtStatus = jsonAppRecordData.allowTxtStatus.Value;
-
+                        bool allowTxtStatus = jsonAppRecordData.GetPropertyValue("allowTxtStatus", false);
                         if (!allowTxtStatus)
                             return Task.FromResult<DnsDatagram>(null);
 
-                        string healthCheck = jsonAppRecordData.healthCheck?.Value;
+                        string healthCheck = jsonAppRecordData.GetPropertyValue("healthCheck", null);
                         Uri healthCheckUrl = null;
 
                         if (_healthService.HealthChecks.TryGetValue(healthCheck, out HealthCheck hc) && ((hc.Type == HealthCheckType.Https) || (hc.Type == HealthCheckType.Http)) && (hc.Url is null))
                         {
                             //read health check url only for http/https type checks and only when app config does not have an url configured
-                            if ((jsonAppRecordData.healthCheckUrl is not null) && (jsonAppRecordData.healthCheckUrl.Value is not null))
+                            if (jsonAppRecordData.TryGetProperty("healthCheckUrl", out JsonElement jsonHealthCheckUrl) && (jsonHealthCheckUrl.ValueKind != JsonValueKind.Null))
                             {
-                                healthCheckUrl = new Uri(jsonAppRecordData.healthCheckUrl.Value);
+                                healthCheckUrl = new Uri(jsonHealthCheckUrl.GetString());
                             }
                             else
                             {
@@ -257,8 +255,11 @@ namespace Failover
 
                         List<DnsResourceRecord> answers = new List<DnsResourceRecord>();
 
-                        GetStatusAnswers(jsonAppRecordData.primary, FailoverType.Primary, question, 30, healthCheck, healthCheckUrl, answers);
-                        GetStatusAnswers(jsonAppRecordData.secondary, FailoverType.Secondary, question, 30, healthCheck, healthCheckUrl, answers);
+                        if (jsonAppRecordData.TryGetProperty("primary", out JsonElement jsonPrimary))
+                            GetStatusAnswers(jsonPrimary, FailoverType.Primary, question, 30, healthCheck, healthCheckUrl, answers);
+
+                        if (jsonAppRecordData.TryGetProperty("secondary", out JsonElement jsonSecondary))
+                            GetStatusAnswers(jsonSecondary, FailoverType.Secondary, question, 30, healthCheck, healthCheckUrl, answers);
 
                         return Task.FromResult(new DnsDatagram(request.Identifier, true, request.OPCODE, true, false, request.RecursionDesired, isRecursionAllowed, false, false, DnsResponseCode.NoError, request.Question, answers));
                     }

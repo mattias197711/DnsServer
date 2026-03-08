@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2025  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -23,10 +23,14 @@ using System.Net;
 using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
-using TechnitiumLibrary.IO;
+using TechnitiumLibrary;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
+using TechnitiumLibrary.Net.Http.Client;
 using TechnitiumLibrary.Net.Proxy;
 
 namespace Failover
@@ -48,7 +52,7 @@ namespace Failover
 
         readonly HealthService _service;
 
-        string _name;
+        readonly string _name;
         HealthCheckType _type;
         int _interval;
         int _retries;
@@ -58,16 +62,18 @@ namespace Failover
         EmailAlert _emailAlert;
         WebHook _webHook;
 
-        SocketsHttpHandler _httpHandler;
+        HttpClientNetworkHandler _httpHandler;
         HttpClient _httpClient;
 
         #endregion
 
         #region constructor
 
-        public HealthCheck(HealthService service, dynamic jsonHealthCheck)
+        public HealthCheck(HealthService service, JsonElement jsonHealthCheck)
         {
             _service = service;
+
+            _name = jsonHealthCheck.GetPropertyValue("name", "default");
 
             Reload(jsonHealthCheck);
         }
@@ -122,28 +128,32 @@ namespace Failover
 
                     if (_httpHandler is null)
                     {
-                        SocketsHttpHandler httpHandler = new SocketsHttpHandler();
-                        httpHandler.ConnectTimeout = TimeSpan.FromMilliseconds(_timeout);
-                        httpHandler.PooledConnectionIdleTimeout = TimeSpan.FromMilliseconds(Math.Max(10000, _timeout));
+                        HttpClientNetworkHandler httpHandler = new HttpClientNetworkHandler();
                         httpHandler.Proxy = proxy;
-                        httpHandler.AllowAutoRedirect = true;
-                        httpHandler.MaxAutomaticRedirections = 10;
+                        httpHandler.NetworkType = _service.DnsServer.PreferIPv6 ? HttpClientNetworkType.PreferIPv6 : HttpClientNetworkType.Default;
+                        httpHandler.DnsClient = _service.DnsServer;
+
+                        httpHandler.InnerHandler.ConnectTimeout = TimeSpan.FromMilliseconds(_timeout);
+                        httpHandler.InnerHandler.PooledConnectionIdleTimeout = TimeSpan.FromMilliseconds(Math.Max(10000, _timeout));
+                        httpHandler.InnerHandler.AllowAutoRedirect = false;
 
                         _httpHandler = httpHandler;
                         handlerChanged = true;
                     }
                     else
                     {
-                        if ((_httpHandler.ConnectTimeout.TotalMilliseconds != _timeout) || (_httpHandler.Proxy != proxy))
+                        if ((_httpHandler.InnerHandler.ConnectTimeout.TotalMilliseconds != _timeout) || (_httpHandler.Proxy != proxy))
                         {
-                            SocketsHttpHandler httpHandler = new SocketsHttpHandler();
-                            httpHandler.ConnectTimeout = TimeSpan.FromMilliseconds(_timeout);
-                            httpHandler.PooledConnectionIdleTimeout = TimeSpan.FromMilliseconds(Math.Max(10000, _timeout));
+                            HttpClientNetworkHandler httpHandler = new HttpClientNetworkHandler();
                             httpHandler.Proxy = proxy;
-                            httpHandler.AllowAutoRedirect = true;
-                            httpHandler.MaxAutomaticRedirections = 10;
+                            httpHandler.NetworkType = _service.DnsServer.PreferIPv6 ? HttpClientNetworkType.PreferIPv6 : HttpClientNetworkType.Default;
+                            httpHandler.DnsClient = _service.DnsServer;
 
-                            SocketsHttpHandler oldHttpHandler = _httpHandler;
+                            httpHandler.InnerHandler.ConnectTimeout = TimeSpan.FromMilliseconds(_timeout);
+                            httpHandler.InnerHandler.PooledConnectionIdleTimeout = TimeSpan.FromMilliseconds(Math.Max(10000, _timeout));
+                            httpHandler.InnerHandler.AllowAutoRedirect = false;
+
+                            HttpClientNetworkHandler oldHttpHandler = _httpHandler;
                             _httpHandler = httpHandler;
                             handlerChanged = true;
 
@@ -156,6 +166,7 @@ namespace Failover
                         HttpClient httpClient = new HttpClient(_httpHandler);
                         httpClient.Timeout = TimeSpan.FromMilliseconds(_timeout);
                         httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(HTTP_HEALTH_CHECK_USER_AGENT);
+                        httpClient.DefaultRequestHeaders.ConnectionClose = true;
 
                         _httpClient = httpClient;
                     }
@@ -166,6 +177,7 @@ namespace Failover
                             HttpClient httpClient = new HttpClient(_httpHandler);
                             httpClient.Timeout = TimeSpan.FromMilliseconds(_timeout);
                             httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(HTTP_HEALTH_CHECK_USER_AGENT);
+                            httpClient.DefaultRequestHeaders.ConnectionClose = true;
 
                             HttpClient oldHttpClient = _httpClient;
                             _httpClient = httpClient;
@@ -195,63 +207,25 @@ namespace Failover
 
         #region public
 
-        public void Reload(dynamic jsonHealthCheck)
+        public void Reload(JsonElement jsonHealthCheck)
         {
-            if (jsonHealthCheck.name is null)
-                _name = "default";
-            else
-                _name = jsonHealthCheck.name.Value;
+            _type = Enum.Parse<HealthCheckType>(jsonHealthCheck.GetPropertyValue("type", "Tcp"), true);
+            _interval = jsonHealthCheck.GetPropertyValue("interval", 60) * 1000;
+            _retries = jsonHealthCheck.GetPropertyValue("retries", 3);
+            _timeout = jsonHealthCheck.GetPropertyValue("timeout", 10) * 1000;
+            _port = jsonHealthCheck.GetPropertyValue("port", 80);
 
-            if (jsonHealthCheck.type == null)
-                _type = HealthCheckType.Tcp;
+            if (jsonHealthCheck.TryGetProperty("url", out JsonElement jsonUrl) && (jsonUrl.ValueKind != JsonValueKind.Null))
+                _url = new Uri(jsonUrl.GetString());
             else
-                _type = Enum.Parse<HealthCheckType>(jsonHealthCheck.type.Value, true);
-
-            if (jsonHealthCheck.interval is null)
-                _interval = 60000;
-            else
-                _interval = Convert.ToInt32(jsonHealthCheck.interval.Value) * 1000;
-
-            if (jsonHealthCheck.retries is null)
-                _retries = 3;
-            else
-                _retries = Convert.ToInt32(jsonHealthCheck.retries.Value);
-
-            if (jsonHealthCheck.timeout is null)
-                _timeout = 10000;
-            else
-                _timeout = Convert.ToInt32(jsonHealthCheck.timeout.Value) * 1000;
-
-            if (jsonHealthCheck.port is null)
-                _port = 80;
-            else
-                _port = Convert.ToInt32(jsonHealthCheck.port.Value);
-
-            if ((jsonHealthCheck.url is null) || (jsonHealthCheck.url.Value is null))
                 _url = null;
-            else
-                _url = new Uri(jsonHealthCheck.url.Value);
 
-            string emailAlertName;
-
-            if (jsonHealthCheck.emailAlert is null)
-                emailAlertName = null;
-            else
-                emailAlertName = jsonHealthCheck.emailAlert.Value;
-
-            if ((emailAlertName is not null) && _service.EmailAlerts.TryGetValue(emailAlertName, out EmailAlert emailAlert))
+            if (jsonHealthCheck.TryGetProperty("emailAlert", out JsonElement jsonEmailAlert) && _service.EmailAlerts.TryGetValue(jsonEmailAlert.GetString(), out EmailAlert emailAlert))
                 _emailAlert = emailAlert;
             else
                 _emailAlert = null;
 
-            string webHookName;
-
-            if (jsonHealthCheck.webHook is null)
-                webHookName = null;
-            else
-                webHookName = jsonHealthCheck.webHook.Value;
-
-            if ((webHookName is not null) && _service.WebHooks.TryGetValue(webHookName, out WebHook webHook))
+            if (jsonHealthCheck.TryGetProperty("webHook", out JsonElement jsonWebHook) && _service.WebHooks.TryGetValue(jsonWebHook.GetString(), out WebHook webHook))
                 _webHook = webHook;
             else
                 _webHook = null;
@@ -369,12 +343,18 @@ namespace Failover
                                 {
                                     using (Socket socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp))
                                     {
-                                        await socket.ConnectAsync(address, _port).WithTimeout(_timeout);
+                                        await TechnitiumLibrary.TaskExtensions.TimeoutAsync(delegate (CancellationToken cancellationToken1)
+                                        {
+                                            return socket.ConnectAsync(address, _port, cancellationToken1).AsTask();
+                                        }, _timeout);
                                     }
                                 }
                                 else
                                 {
-                                    using (Socket socket = await proxy.ConnectAsync(new IPEndPoint(address, _port)).WithTimeout(_timeout))
+                                    using (Socket socket = await TechnitiumLibrary.TaskExtensions.TimeoutAsync(delegate (CancellationToken cancellationToken1)
+                                        {
+                                            return proxy.ConnectAsync(new IPEndPoint(address, _port), cancellationToken1);
+                                        }, _timeout))
                                     {
                                         //do nothing
                                     }
@@ -450,7 +430,7 @@ namespace Failover
 
                                 return new HealthCheckResponse(HealthStatus.Failed, "Received HTTP status code: " + (int)httpResponse.StatusCode + " " + httpResponse.StatusCode.ToString() + "; URL: " + url.AbsoluteUri);
                             }
-                            catch (TaskCanceledException ex)
+                            catch (OperationCanceledException ex)
                             {
                                 lastReason = "Connection timed out.";
                                 lastException = ex;

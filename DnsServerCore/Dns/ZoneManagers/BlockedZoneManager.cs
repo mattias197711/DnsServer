@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2025  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,11 +17,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Dns.ResourceRecords;
 using DnsServerCore.Dns.Zones;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
 using TechnitiumLibrary.IO;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
@@ -34,10 +36,15 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         readonly DnsServer _dnsServer;
 
-        readonly AuthZoneManager _zoneManager;
+        AuthZoneManager _zoneManager;
 
-        DnsSOARecord _soaRecord;
-        DnsNSRecord _nsRecord;
+        readonly DnsSOARecordDataExtended _soaRecord;
+        readonly DnsNSRecordDataExtended _nsRecord;
+
+        readonly object _saveLock = new object();
+        bool _pendingSave;
+        readonly Timer _saveTimer;
+        const int SAVE_TIMER_INITIAL_INTERVAL = 5000;
 
         #endregion
 
@@ -49,29 +56,73 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             _zoneManager = new AuthZoneManager(_dnsServer);
 
-            UpdateServerDomain(_dnsServer.ServerDomain);
+            _soaRecord = new DnsSOARecordDataExtended(_dnsServer.ServerDomain, _dnsServer.ResponsiblePerson.Address, 1, 14400, 3600, 604800, _dnsServer.BlockingAnswerTtl);
+            _nsRecord = new DnsNSRecordDataExtended(_dnsServer.ServerDomain);
+
+            _saveTimer = new Timer(delegate (object state)
+            {
+                lock (_saveLock)
+                {
+                    if (_pendingSave)
+                    {
+                        try
+                        {
+                            SaveZoneFileInternal();
+                            _pendingSave = false;
+                        }
+                        catch (Exception ex)
+                        {
+                            _dnsServer.LogManager.Write(ex);
+
+                            //set timer to retry again
+                            _saveTimer.Change(SAVE_TIMER_INITIAL_INTERVAL, Timeout.Infinite);
+                        }
+                    }
+                }
+            });
         }
 
         #endregion
 
-        #region private
+        #region IDisposable
 
-        private void UpdateServerDomain(string serverDomain)
+        bool _disposed;
+
+        public void Dispose()
         {
-            _soaRecord = new DnsSOARecord(serverDomain, "hostadmin." + serverDomain, 1, 14400, 3600, 604800, 60);
-            _nsRecord = new DnsNSRecord(serverDomain);
+            if (_disposed)
+                return;
 
-            _zoneManager.ServerDomain = serverDomain;
+            lock (_saveLock)
+            {
+                _saveTimer?.Dispose();
+
+                if (_pendingSave)
+                {
+                    try
+                    {
+                        SaveZoneFileInternal();
+                    }
+                    catch (Exception ex)
+                    {
+                        _dnsServer.LogManager.Write(ex);
+                    }
+                    finally
+                    {
+                        _pendingSave = false;
+                    }
+                }
+            }
+
+            _disposed = true;
         }
 
         #endregion
 
-        #region public
+        #region zone file
 
         public void LoadBlockedZoneFile()
         {
-            _zoneManager.Flush();
-
             string blockedZoneFile = Path.Combine(_dnsServer.ConfigFolder, "blocked.config");
 
             try
@@ -87,51 +138,131 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
             catch (Exception ex)
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write(ex);
+                _dnsServer.LogManager.Write(ex);
             }
 
             try
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write("DNS Server is loading blocked zone file: " + blockedZoneFile);
-
                 using (FileStream fS = new FileStream(blockedZoneFile, FileMode.Open, FileAccess.Read))
                 {
-                    BinaryReader bR = new BinaryReader(fS);
-
-                    if (Encoding.ASCII.GetString(bR.ReadBytes(2)) != "BZ") //format
-                        throw new InvalidDataException("DnsServer blocked zone file format is invalid.");
-
-                    byte version = bR.ReadByte();
-                    switch (version)
-                    {
-                        case 1:
-                            int length = bR.ReadInt32();
-
-                            for (int i = 0; i < length; i++)
-                                BlockZone(bR.ReadShortString());
-
-                            break;
-
-                        default:
-                            throw new InvalidDataException("DnsServer blocked zone file version not supported.");
-                    }
+                    ReadConfigFrom(fS);
                 }
 
-                if (log != null)
-                    log.Write("DNS Server blocked zone file was loaded: " + blockedZoneFile);
+                _dnsServer.LogManager.Write("DNS Server blocked zone file was loaded: " + blockedZoneFile);
             }
             catch (FileNotFoundException)
-            { }
+            {
+                SaveZoneFileInternal();
+            }
             catch (Exception ex)
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write("DNS Server encountered an error while loading blocked zone file: " + blockedZoneFile + "\r\n" + ex.ToString());
+                _dnsServer.LogManager.Write("DNS Server encountered an error while loading blocked zone file: " + blockedZoneFile + "\r\n" + ex.ToString());
             }
+        }
+
+        public void LoadBlockedZone(Stream s)
+        {
+            lock (_saveLock)
+            {
+                ReadConfigFrom(s);
+
+                SaveZoneFileInternal();
+
+                if (_pendingSave)
+                {
+                    _pendingSave = false;
+                    _saveTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                }
+            }
+        }
+
+        private void SaveZoneFileInternal()
+        {
+            string blockedZoneFile = Path.Combine(_dnsServer.ConfigFolder, "blocked.config");
+
+            using (FileStream fS = new FileStream(blockedZoneFile, FileMode.Create, FileAccess.Write))
+            {
+                WriteConfigTo(fS);
+            }
+
+            _dnsServer.LogManager.Write("DNS Server blocked zone file was saved: " + blockedZoneFile);
+        }
+
+        public void SaveZoneFile()
+        {
+            lock (_saveLock)
+            {
+                if (_pendingSave)
+                    return;
+
+                _pendingSave = true;
+                _saveTimer.Change(SAVE_TIMER_INITIAL_INTERVAL, Timeout.Infinite);
+            }
+        }
+
+        private void ReadConfigFrom(Stream s)
+        {
+            BinaryReader bR = new BinaryReader(s);
+
+            if (Encoding.ASCII.GetString(bR.ReadBytes(2)) != "BZ") //format
+                throw new InvalidDataException("DnsServer blocked zone file format is invalid.");
+
+            byte version = bR.ReadByte();
+            switch (version)
+            {
+                case 1:
+                    int length = bR.ReadInt32();
+                    int i = 0;
+
+                    AuthZoneManager zoneManager = new AuthZoneManager(_dnsServer);
+
+                    zoneManager.LoadSpecialPrimaryZones(delegate ()
+                    {
+                        if (i++ < length)
+                            return bR.ReadShortString();
+
+                        return null;
+                    }, _soaRecord, _nsRecord);
+
+                    _zoneManager = zoneManager;
+                    break;
+
+                default:
+                    throw new InvalidDataException("DnsServer blocked zone file version not supported.");
+            }
+        }
+
+        private void WriteConfigTo(Stream s)
+        {
+            IReadOnlyList<AuthZoneInfo> blockedZones = _zoneManager.GetAllZones();
+            BinaryWriter bW = new BinaryWriter(s);
+
+            bW.Write(Encoding.ASCII.GetBytes("BZ")); //format
+            bW.Write((byte)1); //version
+
+            bW.Write(blockedZones.Count);
+
+            foreach (AuthZoneInfo zone in blockedZones)
+                bW.WriteShortString(zone.Name);
+        }
+
+        #endregion
+
+        #region private
+
+        internal void UpdateServerDomain()
+        {
+            _soaRecord.UpdatePrimaryNameServerAndMinimum(_dnsServer.ServerDomain, _dnsServer.BlockingAnswerTtl);
+            _nsRecord.UpdateNameServer(_dnsServer.ServerDomain);
+        }
+
+        #endregion
+
+        #region public
+
+        public void ImportZones(string[] domains)
+        {
+            _zoneManager.LoadSpecialPrimaryZones(domains, _soaRecord, _nsRecord);
         }
 
         public bool BlockZone(string domain)
@@ -150,14 +281,19 @@ namespace DnsServerCore.Dns.ZoneManagers
             return false;
         }
 
-        public List<AuthZoneInfo> ListZones()
+        public void Flush()
         {
-            return _zoneManager.ListZones();
+            _zoneManager.Flush();
+        }
+
+        public IReadOnlyList<AuthZoneInfo> GetAllZones()
+        {
+            return _zoneManager.GetAllZones();
         }
 
         public void ListAllRecords(string domain, List<DnsResourceRecord> records)
         {
-            _zoneManager.ListAllRecords(domain, records);
+            _zoneManager.ListAllRecords(domain, domain, records);
         }
 
         public void ListSubDomains(string domain, List<string> subDomains)
@@ -165,52 +301,20 @@ namespace DnsServerCore.Dns.ZoneManagers
             _zoneManager.ListSubDomains(domain, subDomains);
         }
 
-        public IReadOnlyList<DnsResourceRecord> QueryRecords(string domain, DnsResourceRecordType type)
-        {
-            return _zoneManager.QueryRecords(domain, type);
-        }
-
-        public void SaveZoneFile()
-        {
-            List<AuthZoneInfo> blockedZones = _dnsServer.BlockedZoneManager.ListZones();
-
-            string blockedZoneFile = Path.Combine(_dnsServer.ConfigFolder, "blocked.config");
-
-            using (FileStream fS = new FileStream(blockedZoneFile, FileMode.Create, FileAccess.Write))
-            {
-                BinaryWriter bW = new BinaryWriter(fS);
-
-                bW.Write(Encoding.ASCII.GetBytes("BZ")); //format
-                bW.Write((byte)1); //version
-
-                bW.Write(blockedZones.Count);
-
-                foreach (AuthZoneInfo zone in blockedZones)
-                    bW.WriteShortString(zone.Name);
-            }
-
-            LogManager log = _dnsServer.LogManager;
-            if (log != null)
-                log.Write("DNS Server blocked zone file was saved: " + blockedZoneFile);
-        }
-
         public DnsDatagram Query(DnsDatagram request)
         {
-            return _zoneManager.Query(request, true);
+            if (_zoneManager.TotalZones < 1)
+                return null;
+
+            return _zoneManager.Query(request, false);
         }
 
         #endregion
 
         #region properties
 
-        internal DnsSOARecord DnsSOARecord
+        internal DnsSOARecordData DnsSOARecord
         { get { return _soaRecord; } }
-
-        public string ServerDomain
-        {
-            get { return _soaRecord.PrimaryNameServer; }
-            set { UpdateServerDomain(value); }
-        }
 
         public int TotalZonesBlocked
         { get { return _zoneManager.TotalZones; } }

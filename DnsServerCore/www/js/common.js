@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2025  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -25,31 +25,48 @@ function htmlDecode(value) {
     return $('<div/>').html(value).text();
 }
 
-function HTTPRequest(url, data, success, error, invalidToken, objAlertPlaceholder, objLoaderPlaceholder, dataIsFormData, dataContentType, dontHideAlert, showInnerError) {
-    var async = false;
+function HTTPRequest(url, method, data, isTextResponse, success, error, invalidToken, twoFactorAuthRequired, objAlertPlaceholder, objLoaderPlaceholder, processData, contentType, dontHideAlert, showInnerError) {
     var finalUrl;
 
-    finalUrl = arguments[0].url;
+    if ((url != null) && (url.url != null))
+        finalUrl = arguments[0].url;
+    else
+        finalUrl = url;
 
-    if (data == null)
+    if (method == null)
+        method = arguments[0].method;
+
+    if (method == null)
+        method = "GET";
+
+    if (data == null) {
         if (arguments[0].data == null)
             data = "";
         else
             data = arguments[0].data;
+    }
 
-    if (success != null)
-        async = true;
-    else
-        if (arguments[0].success != null) {
-            async = true;
-            success = arguments[0].success;
-        }
+    if (isTextResponse == null)
+        isTextResponse = arguments[0].isTextResponse;
+
+    if (isTextResponse == null)
+        isTextResponse = false;
+
+    var dataType = isTextResponse ? null : "json";
+
+    if (success == null)
+        success = arguments[0].success;
+
+    var async = success != null;
 
     if (error == null)
         error = arguments[0].error;
 
     if (invalidToken == null)
         invalidToken = arguments[0].invalidToken;
+
+    if (twoFactorAuthRequired == null)
+        twoFactorAuthRequired = arguments[0].twoFactorAuthRequired;
 
     if (objAlertPlaceholder == null)
         objAlertPlaceholder = arguments[0].objAlertPlaceholder;
@@ -69,149 +86,91 @@ function HTTPRequest(url, data, success, error, invalidToken, objAlertPlaceholde
     if (objLoaderPlaceholder == null)
         objLoaderPlaceholder = arguments[0].objLoaderPlaceholder;
 
-    if (dataIsFormData == null)
-        dataIsFormData = arguments[0].dataIsFormData;
+    if (processData == null)
+        processData = arguments[0].processData;
 
-    if (dataContentType == null)
-        dataContentType = arguments[0].dataContentType;
+    if (contentType == null)
+        contentType = arguments[0].contentType;
 
     if (objLoaderPlaceholder != null)
-        objLoaderPlaceholder.html("<div style='width: 64px; height: inherit; margin: auto;'><div style='height: inherit; display: table-cell; vertical-align: middle;'><img src='/img/loader.gif'/></div></div>");
+        objLoaderPlaceholder.html("<div style='width: 64px; height: inherit; margin: auto;'><div style='height: inherit; display: table-cell; vertical-align: middle;'><img src='img/loader.gif'/></div></div>");
 
     var successFlag = false;
-    var processData;
-
-    if (dataIsFormData != null) {
-        if (dataIsFormData == true) {
-            processData = false;
-            dataContentType = false;
-        }
-    }
 
     $.ajax({
-        type: "POST",
+        type: method,
         url: finalUrl,
         data: data,
-        dataType: "json",
+        dataType: dataType,
         async: async,
         cache: false,
         processData: processData,
-        contentType: dataContentType,
-        success: function (responseJson, status, jqXHR) {
-
-            if (objLoaderPlaceholder != null)
-                objLoaderPlaceholder.html("");
-
-            switch (responseJson.status) {
-                case "ok":
-                    if (success == null)
-                        successFlag = true;
-                    else
-                        success(responseJson);
-
-                    break;
-
-                case "invalid-token":
-                    if (invalidToken != null)
-                        invalidToken();
-                    else if (error != null)
-                        error();
-                    else
-                        window.location = "/";
-
-                    break;
-
-                case "error":
-                    showAlert("danger", "Error!", responseJson.errorMessage + (showInnerError && (responseJson.innerErrorMessage != null) ? " " + responseJson.innerErrorMessage : ""), objAlertPlaceholder);
-
-                    if (error != null)
-                        error();
-
-                    break;
-
-                default:
-                    showAlert("danger", "Invalid Response!", "Server returned invalid response status: " + responseJson.status, objAlertPlaceholder);
-
-                    if (error != null)
-                        error();
-
-                    break;
-            }
-
-        },
-        error: function (jqXHR, textStatus, errorThrown) {
-
-            if (objLoaderPlaceholder != null)
-                objLoaderPlaceholder.html("");
-
-            if (error != null)
-                error();
-
-            var msg;
-
-            if ((textStatus === "error") && (errorThrown === ""))
-                msg = "Unable to connect to the server. Please try again."
-            else
-                msg = textStatus + " - " + errorThrown;
-
-            showAlert("danger", "Error!", msg, objAlertPlaceholder);
-        }
-    });
-
-    return successFlag;
-}
-
-function HTTPGetFileRequest(url, success, error, objAlertPlaceholder, objLoaderPlaceholder, dontHideAlert) {
-    var async = false;
-    var finalUrl;
-
-    finalUrl = arguments[0].url;
-
-    if (success != null)
-        async = true;
-    else
-        if (arguments[0].success != null) {
-            async = true;
-            success = arguments[0].success;
-        }
-
-    if (error == null)
-        error = arguments[0].error;
-
-    if (objAlertPlaceholder == null)
-        objAlertPlaceholder = arguments[0].objAlertPlaceholder;
-
-    if (dontHideAlert == null)
-        dontHideAlert = arguments[0].dontHideAlert;
-
-    if ((dontHideAlert == null) || !dontHideAlert)
-        hideAlert(objAlertPlaceholder);
-
-    if (objLoaderPlaceholder == null)
-        objLoaderPlaceholder = arguments[0].objLoaderPlaceholder;
-
-    if (objLoaderPlaceholder != null)
-        objLoaderPlaceholder.html("<div style='width: 64px; height: inherit; margin: auto;'><div style='height: inherit; display: table-cell; vertical-align: middle;'><img src='/img/loader.gif'/></div></div>");
-
-    var successFlag = false;
-
-    $.ajax({
-        type: "GET",
-        url: finalUrl,
-        async: async,
-        cache: false,
+        contentType: contentType,
         success: function (response, status, jqXHR) {
-
             if (objLoaderPlaceholder != null)
                 objLoaderPlaceholder.html("");
 
-            if (success == null)
-                successFlag = true;
-            else
-                success(response);
+            if (isTextResponse) {
+                if (success == null)
+                    successFlag = true;
+                else
+                    success(response);
+            }
+            else {
+                switch (response.status) {
+                    case "ok":
+                        if (success == null)
+                            successFlag = true;
+                        else
+                            success(response);
+
+                        break;
+
+                    case "invalid-token":
+                        if (invalidToken != null)
+                            invalidToken();
+                        else {
+                            showAlert("danger", "Error!", response.errorMessage + (showInnerError && (response.innerErrorMessage != null) ? " " + response.innerErrorMessage : ""), objAlertPlaceholder);
+
+                            if (error != null)
+                                error();
+                            else
+                                window.location = "/";
+                        }
+                        break;
+
+                    case "2fa-required":
+                        if (twoFactorAuthRequired != null) {
+                            twoFactorAuthRequired();
+                        }
+                        else {
+                            showAlert("danger", "Error!", response.errorMessage + (showInnerError && (response.innerErrorMessage != null) ? " " + response.innerErrorMessage : ""), objAlertPlaceholder);
+
+                            if (error != null)
+                                error();
+                        }
+
+                        break;
+
+                    case "error":
+                        showAlert("danger", "Error!", response.errorMessage + (showInnerError && (response.innerErrorMessage != null) ? " " + response.innerErrorMessage : ""), objAlertPlaceholder);
+
+                        if (error != null)
+                            error();
+
+                        break;
+
+                    default:
+                        showAlert("danger", "Invalid Response!", "Server returned invalid response status: " + response.status, objAlertPlaceholder);
+
+                        if (error != null)
+                            error();
+
+                        break;
+                }
+            }
         },
         error: function (jqXHR, textStatus, errorThrown) {
-
             if (objLoaderPlaceholder != null)
                 objLoaderPlaceholder.html("");
 
@@ -311,8 +270,8 @@ function sortTable(tableId, n) {
     }
 }
 
-function serializeTableData(table, columns) {
-    var data = table.find('input:text, select');
+function serializeTableData(table, columns, objAlertPlaceholder) {
+    var data = table.find('input:text, :input[type="number"], input:checkbox, input:hidden, select');
     var output = "";
 
     for (var i = 0; i < data.length; i += columns) {
@@ -324,19 +283,28 @@ function serializeTableData(table, columns) {
                 output += "|";
 
             var cell = $(data[i + j]);
-            var cellValue = cell.val();
-            var optional = (cell.attr("data-optional") === "true");
 
-            if ((cellValue === "") && !optional) {
-                showAlert("warning", "Missing!", "Please enter a valid value in the text field in focus.");
-                cell.focus();
-                return false;
+            var cellValue;
+
+            if (cell.attr("type") == "checkbox") {
+                cellValue = cell.prop("checked").toString();
             }
+            else {
+                cellValue = cell.val();
 
-            if (cellValue.includes("|")) {
-                showAlert("warning", "Invalid Character!", "Please edit the value in the text field in focus to remove '|' character.");
-                cell.focus();
-                return false;
+                var optional = (cell.attr("data-optional") === "true");
+
+                if ((cellValue === "") && !optional) {
+                    showAlert("warning", "Missing!", "Please enter a valid value in the text field in focus.", objAlertPlaceholder);
+                    cell.focus();
+                    return false;
+                }
+
+                if (cellValue.includes("|")) {
+                    showAlert("warning", "Invalid Character!", "Please edit the value in the text field in focus to remove '|' character.", objAlertPlaceholder);
+                    cell.focus();
+                    return false;
+                }
             }
 
             output += htmlDecode(cellValue);

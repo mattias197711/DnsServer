@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2025  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@ using System.Net.Sockets;
 using System.ServiceProcess;
 using System.Text;
 using System.Windows.Forms;
-using TechnitiumLibrary.IO;
+using TechnitiumLibrary.Net;
 
 namespace DnsServerSystemTrayApp
 {
@@ -54,6 +54,7 @@ namespace DnsServerSystemTrayApp
         private ToolStripMenuItem StartServiceMenuItem;
         private ToolStripMenuItem RestartServiceMenuItem;
         private ToolStripMenuItem StopServiceMenuItem;
+        private ToolStripMenuItem FirewallMenuItem;
         private ToolStripMenuItem AboutMenuItem;
         private ToolStripMenuItem AutoStartMenuItem;
         private ToolStripMenuItem ExitMenuItem;
@@ -62,7 +63,7 @@ namespace DnsServerSystemTrayApp
 
         #region constructor
 
-        public MainApplicationContext(string configFile, string[] args)
+        public MainApplicationContext(string configFile, string[] args, ref bool exitApp)
         {
             _configFile = configFile;
             LoadConfig();
@@ -73,14 +74,19 @@ namespace DnsServerSystemTrayApp
             {
                 switch (args[0])
                 {
+                    case "--network-dns-default-exit":
+                        SetNetworkDnsToDefault(true);
+                        exitApp = true;
+                        break;
+
                     case "--network-dns-default":
-                        DefaultNetworkDnsMenuItem_Click(this, EventArgs.Empty);
+                        SetNetworkDnsToDefault();
                         break;
 
                     case "--network-dns-item":
                         foreach (DnsProvider dnsProvider in _dnsProviders)
                         {
-                            if (dnsProvider.Name.Equals(args[1]))
+                            if ((args.Length > 1) && dnsProvider.Name.Equals(args[1]))
                             {
                                 NetworkDnsMenuSubItem_Click(new ToolStripMenuItem(dnsProvider.Name) { Tag = dnsProvider }, EventArgs.Empty);
                                 break;
@@ -104,8 +110,41 @@ namespace DnsServerSystemTrayApp
                         StopServiceMenuItem_Click(this, EventArgs.Empty);
                         break;
 
+                    case "--auto-firewall-entry":
+                        if (args.Length > 1)
+                            SetAutoFirewallEntry(bool.Parse(args[1]));
+
+                        break;
+
                     case "--first-run":
-                        SetNetworkDns(new DnsProvider("Technitium", new IPAddress[] { IPAddress.Loopback, IPAddress.IPv6Loopback }));
+                        bool usingLoopbackAsDns = false;
+
+                        try
+                        {
+                            foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+                            {
+                                if (nic.OperationalStatus != OperationalStatus.Up)
+                                    continue;
+
+                                foreach (IPAddress dnsAddress in nic.GetIPProperties().DnsAddresses)
+                                {
+                                    if (IPAddress.IsLoopback(dnsAddress))
+                                    {
+                                        usingLoopbackAsDns = true;
+                                        break;
+                                    }
+                                }
+
+                                if (usingLoopbackAsDns)
+                                    break;
+                            }
+                        }
+                        catch
+                        { }
+
+                        if (!usingLoopbackAsDns && MessageBox.Show("Do you want to update this computer's network connections to use the locally running Technitium DNS Server?\r\n\r\nNote! It is recommended that you use the locally running Technitium DNS Server unless you explicitly want to keep using your existing network DNS configuration.", "Switch Network DNS? - Technitium DNS Server", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                            SetNetworkDns(new DnsProvider("Technitium", new IPAddress[] { IPAddress.Loopback, IPAddress.IPv6Loopback }));
+
                         break;
                 }
             }
@@ -193,6 +232,14 @@ namespace DnsServerSystemTrayApp
             });
 
             //
+            // FirewallMenuItem
+            //
+            FirewallMenuItem = new ToolStripMenuItem();
+            FirewallMenuItem.Name = "FirewallMenuItem";
+            FirewallMenuItem.Text = "Auto &Firewall Entry";
+            FirewallMenuItem.Click += FirewallMenuItem_Click;
+
+            //
             // AboutMenuItem
             //
             AboutMenuItem = new ToolStripMenuItem();
@@ -222,6 +269,7 @@ namespace DnsServerSystemTrayApp
                 new ToolStripSeparator(),
                 NetworkDnsMenuItem,
                 ServiceMenuItem,
+                FirewallMenuItem,
                 AboutMenuItem,
                 new ToolStripSeparator(),
                 AutoStartMenuItem,
@@ -267,7 +315,7 @@ namespace DnsServerSystemTrayApp
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error occured while loading config file. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Error occurred while loading config file. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -290,11 +338,11 @@ namespace DnsServerSystemTrayApp
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error occured while saving config file. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Error occurred while saving config file. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        private void SetNetworkDns(DnsProvider dnsProvider)
+        private static void SetNetworkDns(DnsProvider dnsProvider)
         {
             if (!Program.IsAdmin)
             {
@@ -319,7 +367,7 @@ namespace DnsServerSystemTrayApp
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error occured while setting " + dnsProvider.Name + " as network DNS server. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Error occurred while setting " + dnsProvider.Name + " as network DNS server. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -406,8 +454,24 @@ namespace DnsServerSystemTrayApp
 
             using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\" + nic.Id, true))
             {
-                if (key != null)
+                if (key is not null)
                     key.SetValue("NameServer", nameServer, RegistryValueKind.String);
+            }
+        }
+
+        private static void SetAutoFirewallEntry(bool value)
+        {
+            try
+            {
+                using (RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Technitium\DNS Server", true))
+                {
+                    if (key is not null)
+                        key.SetValue("AutoFirewallEntry", value ? 1 : 0, RegistryValueKind.DWord);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error occurred while setting auto firewall registry entry value. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -445,7 +509,6 @@ namespace DnsServerSystemTrayApp
                 }
                 catch
                 { }
-
 
                 NetworkDnsMenuItem.DropDownItems.Clear();
                 NetworkDnsMenuItem.DropDownItems.Add(DefaultNetworkDnsMenuItem);
@@ -528,13 +591,32 @@ namespace DnsServerSystemTrayApp
 
                 #endregion
 
+                #region auto firewall
+
+                bool autoFirewallEntry = true;
+
+                try
+                {
+                    using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Technitium\DNS Server", false))
+                    {
+                        if (key is not null)
+                            autoFirewallEntry = Convert.ToInt32(key.GetValue("AutoFirewallEntry", 1)) == 1;
+                    }
+                }
+                catch
+                { }
+
+                FirewallMenuItem.Checked = autoFirewallEntry;
+
+                #endregion
+
                 #region auto start
 
                 try
                 {
-                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false))
                     {
-                        if (key != null)
+                        if (key is not null)
                         {
                             string autoStartPath = key.GetValue("Technitium DNS System Tray") as string;
 
@@ -554,33 +636,43 @@ namespace DnsServerSystemTrayApp
         private void DashboardMenuItem_Click(object sender, EventArgs e)
         {
             int port = 5380;
+            string host = "localhost";
 
+            //try finding port number from web service config file
             try
             {
-                //try finding port number from dns config file
+                string webServiceConfigFile = Path.Combine(Path.GetDirectoryName(Program.APP_PATH), "config", "webservice.config");
 
-                string dnsConfigFile = Path.Combine(Path.GetDirectoryName(Program.APP_PATH), "config", "dns.config");
-
-                using (FileStream fS = new FileStream(dnsConfigFile, FileMode.Open, FileAccess.Read))
+                using (FileStream fS = new FileStream(webServiceConfigFile, FileMode.Open, FileAccess.Read))
                 {
                     BinaryReader bR = new BinaryReader(fS);
 
-                    if (Encoding.ASCII.GetString(bR.ReadBytes(2)) != "DS") //format
-                        throw new InvalidDataException("DnsServer config file format is invalid.");
+                    if (Encoding.ASCII.GetString(bR.ReadBytes(2)) != "WC") //format
+                        throw new InvalidDataException("DNS Server config file format is invalid.");
 
                     int version = bR.ReadByte();
-
-                    if (version > 1)
+                    if (version > 0)
                     {
-                        string serverDomain = bR.ReadShortString();
-                        port = bR.ReadInt32();
+                        port = bR.ReadInt32(); //http port
+                        _ = bR.ReadInt32(); //https port
+
+                        {
+                            int count = bR.ReadByte();
+                            if (count > 0)
+                            {
+                                IPAddress localAddress = IPAddressExtensions.ReadFrom(bR);
+
+                                if (!IPAddress.IPv6Any.Equals(localAddress) && !IPAddress.Any.Equals(localAddress) && !IPAddress.IsLoopback(localAddress))
+                                    host = localAddress.ToString();
+                            }
+                        }
                     }
                 }
             }
             catch
             { }
 
-            ProcessStartInfo processInfo = new ProcessStartInfo("http://localhost:" + port.ToString());
+            ProcessStartInfo processInfo = new ProcessStartInfo($"http://{host}:{port}");
 
             processInfo.UseShellExecute = true;
             processInfo.Verb = "open";
@@ -590,9 +682,16 @@ namespace DnsServerSystemTrayApp
 
         private void DefaultNetworkDnsMenuItem_Click(object sender, EventArgs e)
         {
+            SetNetworkDnsToDefault();
+        }
+
+        private static void SetNetworkDnsToDefault(bool silent = false)
+        {
             if (!Program.IsAdmin)
             {
-                Program.RunAsAdmin("--network-dns-default");
+                if (!silent)
+                    Program.RunAsAdmin("--network-dns-default");
+
                 return;
             }
 
@@ -626,11 +725,13 @@ namespace DnsServerSystemTrayApp
                     { }
                 }
 
-                MessageBox.Show("The network DNS servers were set to default successfully.", "Default DNS Set - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (!silent)
+                    MessageBox.Show("The network DNS servers were set to default successfully.", "Default DNS Set - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error occured while setting default network DNS servers. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!silent)
+                    MessageBox.Show("Error occurred while setting default network DNS servers. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -684,7 +785,7 @@ namespace DnsServerSystemTrayApp
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error occured while starting service. " + ex.Message, "Service Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Error occurred while starting service. " + ex.Message, "Service Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -711,7 +812,7 @@ namespace DnsServerSystemTrayApp
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error occured while restarting service. " + ex.Message, "Service Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Error occurred while restarting service. " + ex.Message, "Service Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -736,8 +837,19 @@ namespace DnsServerSystemTrayApp
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error occured while stopping service. " + ex.Message, "Service Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Error occurred while stopping service. " + ex.Message, "Service Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        private void FirewallMenuItem_Click(object sender, EventArgs e)
+        {
+            if (!Program.IsAdmin)
+            {
+                Program.RunAsAdmin("--auto-firewall-entry " + (!FirewallMenuItem.Checked).ToString());
+                return;
+            }
+
+            SetAutoFirewallEntry(!FirewallMenuItem.Checked);
         }
 
         private void AboutMenuItem_Click(object sender, EventArgs e)
@@ -757,13 +869,13 @@ namespace DnsServerSystemTrayApp
                 {
                     using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
                     {
-                        if (key != null)
+                        if (key is not null)
                             key.DeleteValue("Technitium DNS System Tray", false);
                     }
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Error occured while removing auto start registry entry. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show("Error occurred while removing auto start registry entry. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             else
@@ -773,13 +885,13 @@ namespace DnsServerSystemTrayApp
                 {
                     using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
                     {
-                        if (key != null)
+                        if (key is not null)
                             key.SetValue("Technitium DNS System Tray", "\"" + Program.APP_PATH + "\"", RegistryValueKind.String);
                     }
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Error occured while adding auto start registry entry. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show("Error occurred while adding auto start registry entry. " + ex.Message, "Error - " + Resources.ServiceName, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }

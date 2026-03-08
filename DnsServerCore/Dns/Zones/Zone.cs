@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2025  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@ using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using TechnitiumLibrary.Net;
-using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore.Dns.Zones
 {
@@ -40,14 +40,20 @@ namespace DnsServerCore.Dns.Zones
 
         protected Zone(string name)
         {
-            _name = name;
+            _name = name.ToLowerInvariant();
             _entries = new ConcurrentDictionary<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>>(1, 5);
         }
 
         protected Zone(string name, int capacity)
         {
-            _name = name;
+            _name = name.ToLowerInvariant();
             _entries = new ConcurrentDictionary<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>>(1, capacity);
+        }
+
+        protected Zone(string name, ConcurrentDictionary<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entries)
+        {
+            _name = name.ToLowerInvariant();
+            _entries = entries;
         }
 
         #endregion
@@ -76,7 +82,7 @@ namespace DnsServerCore.Dns.Zones
 
                 case AddressFamily.InterNetworkV6:
                     for (int i = 0; i < addressByteCount; i++)
-                        reverseZone = (addressBytes[i] & 0x0F).ToString("X") + "." + (addressBytes[i] >> 4).ToString("X") + "." + reverseZone;
+                        reverseZone = (addressBytes[i] & 0x0F).ToString("x") + "." + (addressBytes[i] >> 4).ToString("x") + "." + reverseZone;
 
                     reverseZone += "ip6.arpa";
                     break;
@@ -92,13 +98,18 @@ namespace DnsServerCore.Dns.Zones
 
         #region public
 
-        public void ListAllRecords(List<DnsResourceRecord> records)
+        public virtual void ListAllRecords(List<DnsResourceRecord> records)
         {
             foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
                 records.AddRange(entry.Value);
         }
 
         public abstract bool ContainsNameServerRecords();
+
+        public override string ToString()
+        {
+            return _name;
+        }
 
         #endregion
 
@@ -107,7 +118,7 @@ namespace DnsServerCore.Dns.Zones
         public string Name
         { get { return _name; } }
 
-        public bool IsEmpty
+        public virtual bool IsEmpty
         { get { return _entries.IsEmpty; } }
 
         #endregion

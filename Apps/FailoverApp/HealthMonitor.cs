@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2025  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@ using DnsServerCore.ApplicationCommon;
 using System;
 using System.Net;
 using System.Threading;
-using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace Failover
 {
@@ -258,8 +258,12 @@ namespace Failover
                 }
                 finally
                 {
-                    if (!_disposed && (_healthCheck is not null))
-                        _healthCheckTimer.Change(_healthCheck.Interval, Timeout.Infinite);
+                    try
+                    {
+                        _healthCheckTimer?.Change(_healthCheck.Interval, Timeout.Infinite);
+                    }
+                    catch (ObjectDisposedException)
+                    { }
                 }
             }, null, Timeout.Infinite, Timeout.Infinite);
 
@@ -279,8 +283,7 @@ namespace Failover
 
             if (disposing)
             {
-                if (_healthCheckTimer is not null)
-                    _healthCheckTimer.Dispose();
+                _healthCheckTimer?.Dispose();
             }
 
             _disposed = true;
@@ -301,15 +304,27 @@ namespace Failover
             return DateTime.UtcNow > _lastHealthStatusCheckedOn.AddMilliseconds(MONITOR_EXPIRY);
         }
 
+        public void SetUnderMaintenance()
+        {
+            _lastHealthCheckResponse = new HealthCheckResponse(HealthStatus.Maintenance);
+        }
+
         #endregion
 
         #region properties
+
+        public IPAddress Address
+        { get { return _address; } }
 
         public HealthCheckResponse LastHealthCheckResponse
         {
             get
             {
                 _lastHealthStatusCheckedOn = DateTime.UtcNow;
+
+                if (_lastHealthCheckResponse is null)
+                    return new HealthCheckResponse(HealthStatus.Unknown);
+
                 return _lastHealthCheckResponse;
             }
         }

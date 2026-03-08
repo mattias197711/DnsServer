@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2025  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,26 +18,27 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.ApplicationCommon;
-using Newtonsoft.Json;
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Text.Json;
 using System.Threading.Tasks;
+using TechnitiumLibrary;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DropRequests
 {
-    public class App : IDnsApplication, IDnsRequestController
+    public sealed class App : IDnsApplication, IDnsRequestController
     {
         #region variables
 
         bool _enableBlocking;
         bool _dropMalformedRequests;
-        IReadOnlyList<NetworkAddress> _allowedNetworks;
-        IReadOnlyList<NetworkAddress> _blockedNetworks;
-        IReadOnlyList<BlockedQuestion> _blockedQuestions;
+        NetworkAddress[] _allowedNetworks;
+        NetworkAddress[] _blockedNetworks;
+        BlockedQuestion[] _blockedQuestions;
 
         #endregion
 
@@ -54,64 +55,32 @@ namespace DropRequests
 
         public async Task InitializeAsync(IDnsServer dnsServer, string config)
         {
-            dynamic jsonConfig = JsonConvert.DeserializeObject(config);
+            using JsonDocument jsonDocument = JsonDocument.Parse(config);
+            JsonElement jsonConfig = jsonDocument.RootElement;
 
-            _enableBlocking = jsonConfig.enableBlocking.Value;
+            _enableBlocking = jsonConfig.GetProperty("enableBlocking").GetBoolean();
 
-            if (jsonConfig.dropMalformedRequests is null)
+            if (jsonConfig.TryGetProperty("dropMalformedRequests", out JsonElement jsonDropMalformedRequests))
+                _dropMalformedRequests = jsonDropMalformedRequests.GetBoolean();
+            else
                 _dropMalformedRequests = false;
-            else
-                _dropMalformedRequests = jsonConfig.dropMalformedRequests.Value;
 
-            if (jsonConfig.allowedNetworks is null)
-            {
-                _allowedNetworks = Array.Empty<NetworkAddress>();
-            }
-            else
-            {
-                List<NetworkAddress> allowedNetworks = new List<NetworkAddress>();
-
-                foreach (dynamic allowedNetwork in jsonConfig.allowedNetworks)
-                {
-                    allowedNetworks.Add(NetworkAddress.Parse(allowedNetwork.Value));
-                }
-
+            if (jsonConfig.TryReadArray("allowedNetworks", NetworkAddress.Parse, out NetworkAddress[] allowedNetworks))
                 _allowedNetworks = allowedNetworks;
-            }
-
-            if (jsonConfig.blockedNetworks is null)
-            {
-                _blockedNetworks = Array.Empty<NetworkAddress>();
-            }
             else
-            {
-                List<NetworkAddress> blockedNetworks = new List<NetworkAddress>();
+                _allowedNetworks = Array.Empty<NetworkAddress>();
 
-                foreach (dynamic blockedNetwork in jsonConfig.blockedNetworks)
-                {
-                    blockedNetworks.Add(NetworkAddress.Parse(blockedNetwork.Value));
-                }
-
+            if (jsonConfig.TryReadArray("blockedNetworks", NetworkAddress.Parse, out NetworkAddress[] blockedNetworks))
                 _blockedNetworks = blockedNetworks;
-            }
-
-            if (jsonConfig.blockedQuestions is null)
-            {
-                _blockedQuestions = Array.Empty<BlockedQuestion>();
-            }
             else
-            {
-                List<BlockedQuestion> blockedQuestions = new List<BlockedQuestion>();
+                _blockedNetworks = Array.Empty<NetworkAddress>();
 
-                foreach (dynamic blockedQuestion in jsonConfig.blockedQuestions)
-                {
-                    blockedQuestions.Add(new BlockedQuestion(blockedQuestion));
-                }
-
+            if (jsonConfig.TryReadArray("blockedQuestions", delegate (JsonElement blockedQuestion) { return new BlockedQuestion(blockedQuestion); }, out BlockedQuestion[] blockedQuestions))
                 _blockedQuestions = blockedQuestions;
-            }
+            else
+                _blockedQuestions = Array.Empty<BlockedQuestion>();
 
-            if (jsonConfig.dropMalformedRequests is null)
+            if (!jsonConfig.TryGetProperty("dropMalformedRequests", out _))
             {
                 config = config.Replace("\"allowedNetworks\"", "\"dropMalformedRequests\": false,\r\n  \"allowedNetworks\"");
 
@@ -169,21 +138,32 @@ namespace DropRequests
             #region variables
 
             readonly string _name;
+            readonly bool _blockZone;
             readonly DnsResourceRecordType _type;
 
             #endregion
 
             #region constructor
 
-            public BlockedQuestion(dynamic jsonQuestion)
+            public BlockedQuestion(JsonElement jsonQuestion)
             {
-                _name = jsonQuestion.name?.Value;
+                if (jsonQuestion.TryGetProperty("name", out JsonElement jsonName))
+                    _name = jsonName.GetString().TrimEnd('.');
 
-                string strType = jsonQuestion.type?.Value;
-                if (!string.IsNullOrEmpty(strType) && Enum.TryParse(strType, true, out DnsResourceRecordType type))
+                if (jsonQuestion.TryGetProperty("blockZone", out JsonElement jsonBlockZone))
+                    _blockZone = jsonBlockZone.GetBoolean();
+
+                if (jsonQuestion.TryGetProperty("type", out JsonElement jsonType))
+                {
+                    if (!Enum.TryParse(jsonType.GetString(), true, out DnsResourceRecordType type))
+                        throw new NotSupportedException("DNS record type is not supported: " + jsonType.GetString());
+
                     _type = type;
+                }
                 else
+                {
                     _type = DnsResourceRecordType.Unknown;
+                }
             }
 
             #endregion
@@ -192,8 +172,19 @@ namespace DropRequests
 
             public bool Matches(DnsQuestionRecord question)
             {
-                if ((_name is not null) && !_name.Equals(question.Name, StringComparison.OrdinalIgnoreCase))
-                    return false;
+                if (_name is not null)
+                {
+                    if (_blockZone)
+                    {
+                        if ((_name.Length > 0) && !_name.Equals(question.Name, StringComparison.OrdinalIgnoreCase) && !question.Name.EndsWith("." + _name, StringComparison.OrdinalIgnoreCase))
+                            return false;
+                    }
+                    else
+                    {
+                        if (!_name.Equals(question.Name, StringComparison.OrdinalIgnoreCase))
+                            return false;
+                    }
+                }
 
                 if ((_type != DnsResourceRecordType.Unknown) && (_type != question.Type))
                     return false;

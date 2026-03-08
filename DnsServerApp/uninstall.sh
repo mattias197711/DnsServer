@@ -1,7 +1,13 @@
 #!/bin/sh
 
 dotnetDir="/opt/dotnet"
-dnsDir="/etc/dns"
+
+if [ -d "/etc/dns/config" ]
+then
+	dnsDir="/etc/dns"
+else
+    dnsDir="/opt/technitium/dns"
+fi
 
 echo ""
 echo "================================="
@@ -27,7 +33,7 @@ then
 
 	if [ -d $dotnetDir ]
 	then
-		echo "Uninstalling .NET 5 Runtime..."
+		echo "Uninstalling .NET Runtime..."
 		rm /usr/bin/dotnet >/dev/null 2>&1
 		rm -rf $dotnetDir >/dev/null 2>&1
 	fi

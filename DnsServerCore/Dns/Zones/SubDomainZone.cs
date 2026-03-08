@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2025  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using DnsServerCore.Dns.ResourceRecords;
 using System.Collections.Generic;
-using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore.Dns.Zones
 {
@@ -27,13 +27,13 @@ namespace DnsServerCore.Dns.Zones
     {
         #region variables
 
-        readonly AuthZone _authoritativeZone;
+        readonly ApexZone _authoritativeZone;
 
         #endregion
 
         #region constructor
 
-        protected SubDomainZone(AuthZone authoritativeZone, string name)
+        protected SubDomainZone(ApexZone authoritativeZone, string name)
             : base(name)
         {
             _authoritativeZone = authoritativeZone;
@@ -49,22 +49,22 @@ namespace DnsServerCore.Dns.Zones
             {
                 foreach (DnsResourceRecord record in entry.Value)
                 {
-                    if (!record.IsDisabled())
+                    if (!record.GetAuthGenericRecordInfo().Disabled)
                     {
-                        _disabled = false;
+                        Disabled = false;
                         return;
                     }
                 }
             }
 
-            _disabled = true;
+            Disabled = true;
         }
 
         #endregion
 
         #region properties
 
-        public AuthZone AuthoritativeZone
+        public ApexZone AuthoritativeZone
         { get { return _authoritativeZone; } }
 
         #endregion
